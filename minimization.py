@@ -16,12 +16,13 @@ class lbfgs(object):
   def __init__(self, fmodels,
                      restraints_manager       = None,
                      model                    = None,
-                     start_scatterers           = None,
+                     start_scatterers         = None,
                      former_x                 = None,
                      is_neutron_scat_table    = None,
                      target_weights           = None,
                      refine_xyz               = False,
                      lbfgs_termination_params = None,
+                     use_direction            = False,
                      use_fortran              = False,
                      verbose                  = 0,
                      correct_special_position_tolerance = 1.0,
@@ -90,13 +91,18 @@ class lbfgs(object):
       exception_handling_params = scitbx.lbfgs.exception_handling_parameters(
                          ignore_line_search_failed_step_at_lower_bound = True))
     self.apply_shifts()
-    self.apply_shifts_lasso()
+    if not self.use_direction:
+      self.apply_shifts_lasso()
 #done with x minimization, update u, z
-    lasso_sites_cart = self.xray_structure_null.sites_cart()
+      lasso_sites_cart = self.xray_structure_null.sites_cart()
+    else:
+      lasso_sites_cart = self.xray_structure.sites_cart()
     if(self.model.use_ias and self.model.ias_selection is not None and
       self.model.ias_selection.count(True) > 0):
-      lasso_sites_cart = lasso_sites_cart.select(~self.ias_selection)
-    self.den_manager.update_eq_edges(lasso_sites_cart)
+      lasso_sites_cart = lasso_sites_cart.select(~self.model.ias_selection)
+    self.new_penalty = self.den_manager.update_eq_edges(lasso_sites_cart)
+#update u, z using scad
+    #self.den_manager.update_edges_scad(lasso_sites_cart)
     #del self._scatterers_start
     self.compute_target(compute_gradients = False,u_iso_refinable_params = None)
     if(self.collect_monitor):
@@ -197,9 +203,12 @@ class lbfgs(object):
       self.f += er * self.weights.w
       #norm_fact = 1./len(self.den_manager.den_lasso_proxies)
 #only shift is needed to calculate lasso penalty
-      lasso_sites_cart = self.xray_structure_null.sites_cart()
+      if not self.use_direction:
+        lasso_sites_cart = self.xray_structure_null.sites_cart()
+      else:
+        lasso_sites_cart = self.xray_structure.sites_cart()
       if(self.model.use_ias and self.model.ias_selection is not None and
-       self.model.ias_selection.count(True) > 0):
+        self.model.ias_selection.count(True) > 0):
         lasso_sites_cart = lasso_sites_cart.select(~self.model.ias_selection)
       lasso_gradient_array = flex.vec3_double(lasso_sites_cart.size(), (0.0,0.0,0.0))
       self.lasso_residuals = \
@@ -232,7 +241,8 @@ class lbfgs(object):
 
   def compute_functional_and_gradients(self):
     u_iso_refinable_params = self.apply_shifts()
-    self.apply_shifts_lasso()
+    if not self.use_direction:
+      self.apply_shifts_lasso()
     self.compute_target(compute_gradients     = True,
                         u_iso_refinable_params = u_iso_refinable_params)
     if (self.verbose > 1):

@@ -17,6 +17,16 @@ den_params = iotbx.phil.parse("""
    .type = float
  weight = 1.0
    .type = float
+ soft_weight = 0.0
+   .type = float
+ use_scad = False
+   .type = bool
+ use_sqrt = True
+   .type = bool
+ use_direction = False
+   .type = bool
+ scad_weight = 3.0
+   .type = float
  sigma = 0.44
    .type = float
  optimize = False
@@ -35,7 +45,7 @@ den_params = iotbx.phil.parse("""
  num_cycles = 15
    .type = int
    .short_caption = Number of cycles
- num_reg_cycles = 5
+ num_reg_cycles = 3
    .type = int
    .short_caption = Length of regularization path
  kappa_burn_in_cycles = 2
@@ -48,7 +58,7 @@ den_params = iotbx.phil.parse("""
  refine_adp = True
    .type = bool
    .short_caption = Refine B-factors
- refine_lasso = False
+ refine_lasso = True
    .type = bool
    .short_caption = Refine with Lasso type restraint
  penalty = 1.00
@@ -71,9 +81,9 @@ den_params = iotbx.phil.parse("""
  restraint_network
     .style = box auto_align
  {
-  lower_distance_cutoff = 1.55
+  lower_distance_cutoff = 1.20
     .type = float
-  upper_distance_cutoff = 15.0
+  upper_distance_cutoff = 10.0
     .type = float
   sequence_separation_low = 0
     .type = int
@@ -160,6 +170,11 @@ class den_restraints(object):
     self.kappa_burn_in_cycles = params.kappa_burn_in_cycles
     self.gamma = params.gamma
     self.weight = params.weight
+    self.soft_weight = params.soft_weight
+    self.scad_weight = params.scad_weight
+    self.use_scad = params.use_scad
+    self.use_sqrt = params.use_sqrt
+    self.use_direction = params.use_direction
     self.sigma = params.sigma
     self.num_cycles = params.num_cycles
     self.num_reg_cycles = params.num_reg_cycles
@@ -419,21 +434,43 @@ class den_restraints(object):
           weight=den_weight)
         self.den_proxies.append(proxy)
 
-  def build_den_lasso_restraints(self):
-    #den_weight = self.weight*(1.0/(self.sigma**2))
-    den_weight = self.weight
+  def build_den_lasso_restraints(self, sites_cart=None):
     print >> self.log, "building DEN LASSO restraints..."
+    def scad(d):
+      #d = d/1.24 - 1
+      if d <= self.scad_weight:
+        return 1.
+      else:
+        if d <= 3.7*self.scad_weight:
+          return (3.7 - d/self.scad_weight)/2.7
+        else:
+          return 0.
     for chain in self.den_atom_pairs.keys():
       for pair in self.den_atom_pairs[chain]:
         i_seq_a = self.i_seq_hash_ref[self.name_hash[pair[0]]]
         i_seq_b = self.i_seq_hash_ref[self.name_hash[pair[1]]]
+        if self.use_direction:
+          a_xyz = sites_cart[i_seq_a]
+          b_xyz = sites_cart[i_seq_b]
+        else:
+          a_xyz = (0.,0.,0.)
+          b_xyz = (0.,0.,0.)
         distance_ideal = self.ref_distance_hash[ (i_seq_a, i_seq_b) ]
         i_seqs = tuple(pair)
+        if self.use_scad:
+          weight = scad(distance_ideal)
+        elif self.use_sqrt:
+          weight = (1.24/distance_ideal)**(0.50)
+        else:
+          weight = 1
         proxy = self.ext.den_lasso_proxy(
           i_seqs=i_seqs,
-          eq_edge=(0.,0.,0.),
+          eq_edge=a_xyz,
+          eq_edge_reverse=b_xyz,
           d_edge=(0.,0.,0.),
-          weight=(1.55/distance_ideal)**(0.25))
+          d_edge_reverse=(0.,0.,0.),
+          weight=weight)
+
         self.den_lasso_proxies.append(proxy)
 
   def get_current_eq_distances(self):
@@ -476,13 +513,32 @@ class den_restraints(object):
                             kappa_local)
   def update_eq_edges(self,
                       sites_cart):
-    self.ext.den_update_eq_edges(sites_cart,
+    return self.ext.den_update_eq_edges(sites_cart,
                             self.den_lasso_proxies,
+                            self.use_direction,
+                            self.soft_weight,
                             self.weight,
                             self.penalty)
   def reset_eq_edges(self,
                     sites_cart):
-    self.ext.den_reset_eq_edges(sites_cart, self.den_lasso_proxies)
+    self.ext.den_reset_eq_edges(sites_cart, 
+                                self.den_lasso_proxies, 
+                                self.use_scad, 
+                                self.use_sqrt, 
+                                self.use_direction, 
+                                self.scad_weight)
+
+  def update_edges_scad(self,
+                        sites_cart):
+    self.ext.den_update_edges_scad(sites_cart,
+                            self.den_lasso_proxies,
+                            self.scad_weight,
+                            self.weight,
+                            self.penalty)
+
+  def update_weight(self,
+                    sites_cart):
+    self.ext.den_update_weight(sites_cart, self.den_lasso_proxies, self.use_direction, self.use_scad, self.scad_weight)
 
   def get_optimization_grid(self):
     # defaults adapted from DEN Nature paper Fig. 1
@@ -527,6 +583,16 @@ class den_restraints(object):
            dp.eq_distance,
            dp.eq_distance_start)
     else:
+      def scad(d):
+        #d = d/1.24 - 1
+        if d <= self.scad_weight:
+          return 1.
+        else:
+          if d <= 3.7*self.scad_weight:
+            return (3.7 - d/self.scad_weight)/2.7
+          else:
+            return 0.
+
       print >> self.log, "\ntotal number of DEN LASSO restraints: %s\n" % \
         len(self.den_lasso_proxies)
       print >> self.log, "%s | %s | %s | %s |" % \
@@ -544,7 +610,10 @@ class den_restraints(object):
         eq_distance = eq_distance**(0.5)
         d_eq_dist = distance_squared(dp.d_edge, dp.d_edge_reverse)
         d_eq_dist = d_eq_dist**(0.5)
-        dp.weight = (1.55/distance)**(0.25)
+        if self.use_scad:
+          dp.weight = scad(distance)
+        elif self.use_sqrt:
+          dp.weight = (1.24/distance)**(0.50)
         if self.name_hash[i_seqs[0]].endswith("    "):
           name1 = self.name_hash[i_seqs[0]][:-4]
         else:

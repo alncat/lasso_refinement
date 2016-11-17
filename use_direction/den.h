@@ -311,14 +311,12 @@ namespace mmtbx { namespace den {
     af::const_ref<scitbx::vec3<double> > const& sites_cart,
     af::ref<den_lasso_proxy> const& proxies,
     bool use_direction,
-    double soft_weight,
     double den_weight=1.0,
     double penalty=1.0)
   {
     double primal_resi = 0;
     scitbx::vec3<double> null_vec(0.,0.,0.);
     double factor = den_weight/penalty;
-    double soft_factor = soft_weight/penalty;
     af::shared<scitbx::vec3<double> > dual_sites(sites_cart.size(), null_vec);
     for (std::size_t i = 0; i < proxies.size(); i++) {
       den_lasso_proxy proxy = proxies[i];
@@ -326,82 +324,70 @@ namespace mmtbx { namespace den {
       af::tiny<unsigned, 2> const& i_seqs = proxy.i_seqs;
       sites[0] = sites_cart[ i_seqs[0] ];
       sites[1] = sites_cart[ i_seqs[1] ];
-      //over relaxation
-      scitbx::vec3<double> hi = 1.5*sites[0] - 0.5*proxy.eq_edge;
-      scitbx::vec3<double> hj = 1.5*sites[1] - 0.5*proxy.eq_edge_reverse;
-      scitbx::vec3<double> devi = hi + proxy.d_edge;
-      scitbx::vec3<double> devj = hj + proxy.d_edge_reverse;
+      scitbx::vec3<double> devi = sites[0] + proxy.d_edge;
+      scitbx::vec3<double> devj = sites[1] + proxy.d_edge_reverse;
       scitbx::vec3<double> dev = devi - devj;
       double dist = dev.length();
       double theta;
       if(use_direction){
         //note that when direction penalty is used, the eq_edge stores the original
         //coordinates, while the eq_egde stores the shifts when direction is not used
+        devi = devi - proxy.eq_edge;
+        devj = devj - proxy.eq_edge_reverse;
         //dev = devi - devj;
+        scitbx::vec3<double> direction = proxy.eq_edge - proxy.eq_edge_reverse;
+        direction = direction.normalize();
+        double prod_i = devi*direction;
+        double prod_j = devj*direction;
+        double prod = prod_i - prod_j;
+        double threshold = 2*factor*proxy.weight;
         //z_update
-        double threshold = factor*proxies[i].weight;
-        double dist_old = (proxies[i].eq_edge - proxies[i].eq_edge_reverse).length();
-        double diff = dist - dist_old;
-        if(diff > 2*threshold){
-          theta = 1 - threshold/dist;
+        if(std::abs(prod) > threshold){
+          if(prod > threshold){
+            prod_i = 1;
+            prod_j = -1;
+          }
+          else if(prod < -threshold){
+            prod_i = -1;
+            prod_j = 1;
+          }
+          scitbx::vec3<double> d_z = devi - (prod_i*factor*proxy.weight)*direction;
+          proxies[i].eq_edge = proxies[i].eq_edge + d_z;
+          d_z = devj + (prod_j*factor*proxy.weight)*direction;
+          proxies[i].eq_edge_reverse = proxies[i].eq_edge_reverse + d_z;
         }
-        else if(diff < -2*threshold){
-          theta = 1 + threshold/dist;
-        }
-        else {
-          theta = 0.5*(1 + dist_old/dist);
+        else{
+          prod_i = prod_i < 1 ? prod_i : 1;
+          prod_i = prod_i > -1 ? prod_i : -1;
+          prod_j = prod_i - prod;
+          scitbx::vec3<double> d_z = devi - prod_i*direction;
+          proxies[i].eq_edge = proxies[i].eq_edge + d_z;
+          d_z = devj + prod_j*direction;
+          proxies[i].eq_edge_reverse = proxies[i].eq_edge_reverse + d_z;
         }
       }
       else{
-        if(dist < 2*factor*proxies[i].weight){
+        if(dist < 1e-20){
           theta = 0.5;
         }
         else{
           theta = 1 - (factor/dist)*proxy.weight;
+          //theta = 1 - factor/dist;
+          theta = theta > 0.5 ? theta: 0.5;
         }
-      }
-      //z_update
-      scitbx::vec3<double> z_i = theta*devi + (1-theta)*devj;//z_k+1
-      scitbx::vec3<double> z_j = theta*devj + (1-theta)*devi;
-      //record z changes
-      dual_sites[ i_seqs[0] ] += z_i - proxies[i].eq_edge;//z_k+1 - z_k
-      dual_sites[ i_seqs[1] ] += z_j - proxies[i].eq_edge_reverse;
-      proxies[i].eq_edge = z_i;
-      proxies[i].eq_edge_reverse = z_j;
-      if (soft_weight != 0){
-        if(proxies[i].eq_edge.length() < soft_factor){
-          for(std::size_t j = 0; j < 3; j++)
-            proxies[i].eq_edge = 0;
-        }
-        else{
-          proxies[i].eq_edge -= soft_factor*proxies[i].eq_edge/proxies[i].eq_edge.length();
-        }
-        if(proxies[i].eq_edge_reverse.length() < soft_factor){
-          for(std::size_t j = 0; j < 3; j++)
-            proxies[i].eq_edge_reverse[j] = 0;
-        }
-        else{
-          proxies[i].eq_edge_reverse -= soft_factor*proxies[i].eq_edge_reverse/proxies[i].eq_edge_reverse.length();
-        }
-        //soft thresholding
-        /*for(std::size_t j = 0; j < 3; j++){
-          if(proxies[i].eq_edge[j] > soft_factor) 
-            proxies[i].eq_edge[j] -= soft_factor;
-          else if (proxies[i].eq_edge[j] < -soft_factor)
-            proxies[i].eq_edge[j] += soft_factor;
-          else
-            proxies[i].eq_edge[j] = 0;
-          if(proxies[i].eq_edge_reverse[j] > soft_factor)
-            proxies[i].eq_edge_reverse[j] -= soft_factor;
-          else if (proxies[i].eq_edge_reverse[j] < -soft_factor)
-            proxies[i].eq_edge_reverse[j] += soft_factor;
-          else
-            proxies[i].eq_edge_reverse[j] = 0;
-        }*/
+        //z_update
+        scitbx::vec3<double> z_i = theta*devi + (1-theta)*devj;//z_k+1
+        scitbx::vec3<double> z_j = theta*devj + (1-theta)*devi;
+        //record z changes
+        dual_sites[ i_seqs[0] ] += z_i - proxies[i].eq_edge;//z_k+1 - z_k
+        dual_sites[ i_seqs[1] ] += z_j - proxies[i].eq_edge_reverse;
+        proxies[i].eq_edge = z_i;
+        proxies[i].eq_edge_reverse = z_j;
+
       }
       //u_update
-      devi = hi - proxies[i].eq_edge;
-      devj = hj - proxies[i].eq_edge_reverse;
+      devi = sites[0] - proxies[i].eq_edge;
+      devj = sites[1] - proxies[i].eq_edge_reverse;
       primal_resi += devi.length_sq() + devj.length_sq();
       proxies[i].d_edge += devi;
       proxies[i].d_edge_reverse += devj;
@@ -412,7 +398,7 @@ namespace mmtbx { namespace den {
     }
     dual_resi = std::sqrt(dual_resi);
     primal_resi = std::sqrt(primal_resi);
-    /*double rho = dual_resi/primal_resi;
+    double rho = dual_resi/primal_resi;
     if(rho > 10*penalty) rho = 2*penalty;
     else if(rho < 0.1*penalty) rho = penalty/2;
     else rho = penalty;
@@ -421,8 +407,8 @@ namespace mmtbx { namespace den {
       for(std::size_t i = 0; i < proxies.size(); i++){
         proxies[i].d_edge *= rho;
       }
-    }*/
-    return 1;
+    }
+    return rho;
   }
 
   inline

@@ -9,7 +9,7 @@ from mmtbx.refinement import adp_refinement
 from mmtbx.geometry_restraints import reference
 from cctbx.array_family import flex
 from cStringIO import StringIO
-import sys, random, math
+import sys, random
 import minimization
 
 class manager(object):
@@ -196,7 +196,6 @@ class manager(object):
     self.x = None
 #generate regularization path
     best_r_free = 1.0
-    best_cv_score = 100
     best_scatterers = None
     best_x = None
     best_proxies = None
@@ -205,15 +204,15 @@ class manager(object):
     alpha = 4.0
     threshold = 5e-4
     early_stopping = 3
-    for i in xrange(-num_reg_den_cycles,num_reg_den_cycles+1):
-      weight_local_i = weight_local*3.0**i
+    for i in xrange(-num_reg_den_cycles,num_reg_den_cycles):
+      weight_local_i = weight_local*5**i
       self.model.restraints_manager.geometry.\
         generic_restraints_manager.den_manager.weight = \
         weight_local_i
       print >> self.log, "  ...trying penalty %.1f, weight %.1f" % (
         penalty_local, weight_local_i)
-      pre_cv_score = 100.0
-      for scale in xrange(-4, 4):
+      pre_r_free = 1.0
+      for scale in xrange(-4, 3):
         trial_target_weights = self.target_weights
         #change scad weight
         #self.model.restraints_manager.geometry.\
@@ -223,9 +222,9 @@ class manager(object):
         pre_cycle = 0
         cycle = 0
         #start from best x for each lambda
-        #self.model.restraints_manager.geometry.\
-        #  generic_restraints_manager.den_manager.penalty = \
-        #    best_penalty
+        self.model.restraints_manager.geometry.\
+          generic_restraints_manager.den_manager.penalty = \
+            best_penalty
         self.x = best_x
         if best_proxies is not None:
           self.model.restraints_manager.geometry.\
@@ -250,9 +249,9 @@ class manager(object):
                 macro_cycle              = cycle,
                 h_params                 = self.params.hydrogens)
           self.x = minimized.x
-          #self.model.restraints_manager.geometry.\
-          #  generic_restraints_manager.den_manager.penalty = minimized.new_penalty
-          #print >> local_log,  "new penalty %d" % (minimized.new_penalty)
+          self.model.restraints_manager.geometry.\
+            generic_restraints_manager.den_manager.penalty = minimized.new_penalty
+          print >> local_log,  "new penalty %d" % (minimized.new_penalty)
         # force update of f_mask for consistent R factors
           self.fmodels.update_xray_structure(
             xray_structure = self.fmodels.fmodel_xray().xray_structure,
@@ -266,16 +265,10 @@ class manager(object):
           utils.assert_xray_structures_equal(
             x1 = minimized.xray_structure,
             x2 = self.model.xray_structure)
-          #print >> local_log, "DEN cycle %d" % (cycle+1)
+          print >> local_log, "DEN cycle %d" % (cycle+1)
           #print >> local_log, "Random seed: %d" % flex.get_random_seed()
-          r_work = self.fmodels.fmodel_xray().r_work()
           r_free = self.fmodels.fmodel_xray().r_free()
-          #r_free_bootstrap = self.fmodels.fmodel_xray().r_free_bootstrap()
-          r_ratio = r_free/r_work
-          overfitting_factor = abs((r_free - r_work)/(0.5 - r_work))
-          w = .632/(1 - .368*overfitting_factor)
-          cv_score = r_work + 0.4*(r_free/r_work)
-          print >> local_log, "rfree, rwork, cv_score at cycle %d: %.4f, %.4f, %.4f" % (cycle+1, r_free, r_work, cv_score)
+          print >> local_log, "rfree at start of minimization cycle: %.4f" % r_free
           if self.ncs_manager is not None:
             self.ncs_manager.update_dihedral_ncs_restraints(
               geometry=self.model.restraints_manager.geometry,
@@ -294,25 +287,25 @@ class manager(object):
           cycle += 1
           self.model.restraints_manager.geometry.\
             generic_restraints_manager.den_manager.current_cycle += 1
-          #r_free = self.fmodels.fmodel_xray().r_free()
-          if abs(cv_score - pre_cv_score) <= threshold:
+          r_free = self.fmodels.fmodel_xray().r_free()
+          if abs(pre_r_free - r_free) <= threshold or pre_r_free - r_free < 0:
             if pre_cycle < early_stopping:
               pre_cycle += 1
             else:
               break
           if r_free - best_r_free > 0.015:
             break
-          pre_cv_score = cv_score
-          if cv_score < best_cv_score and r_free - best_r_free <= 0.0025:
-            best_cv_score = cv_score
+          pre_r_free = r_free
+          if r_free < best_r_free:
             best_r_free = r_free
-            #best_penalty = minimized.new_penalty
+            best_penalty = minimized.new_penalty
             best_weight_local = weight_local_i
             best_scatterers = self.fmodels.fmodel_xray().\
               xray_structure.deep_copy_scatterers().scatterers()
             best_x = self.x.deep_copy()
             best_proxies = self.model.restraints_manager.geometry.\
                     generic_restraints_manager.den_manager.den_lasso_proxies.deep_copy()
+            r_free = self.fmodels.fmodel_xray().r_free()
         #end of inner cycle
         av_shift = self.x.norm()/self.x.size()
         print >> local_log, "average norm of shifts: %f" % av_shift

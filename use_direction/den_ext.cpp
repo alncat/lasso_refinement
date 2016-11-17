@@ -142,13 +142,11 @@ namespace {
       double,
       double,
       double,
-      double,
       double))
     den_update_eq_edges, (
     arg("sites_cart"),
     arg("proxies"),
     arg("use_direction"),
-    arg("soft_weight"),
     arg("den_weight")=1.0,
     arg("penalty")=1.0));
 
